@@ -1,66 +1,74 @@
+import os
+import glob
 import pandas as pd
 import numpy as np
+import kagglehub
 import streamlit as st
-import re
-
-from sklearn.model_selection import train_test_split
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import LogisticRegression
+import tensorflow as tf
+from tensorflow.keras.preprocessing.text import Tokenizer
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Embedding, LSTM, Dense, SpatialDropout1D
 
 @st.cache_resource
-def load_model():
+def load_and_train():
 
-    data = pd.read_csv("email.csv")
+    path = kagglehub.dataset_download("akshatsharma2/the-biggest-spam-ham-phish-email-dataset-300000")
 
-    data = data.dropna()
-    data['Category'] = data['Category'].str.strip().str.lower()
-    data = data[data['Category'].isin(['ham', 'spam'])]
-    data['Category'] = data['Category'].map({'ham': 0, 'spam': 1})
+    csv_files = glob.glob(os.path.join(path, "**/*.csv"), recursive=True)
+    if not csv_files:
+        st.error("Could not find any CSV files in the downloaded dataset.")
+        return None, None, None
 
-    corpus = []
-    for msg in data['Message'].astype(str):
-        msg = re.sub('[^a-zA-Z]', ' ', msg)
-        msg = msg.lower()
-        if msg.strip() == "":
-            msg = "empty"
-        corpus.append(msg)
+    csv_path = max(csv_files, key=os.path.getsize)
 
-    vectorizer = TfidfVectorizer(max_features=5000, stop_words='english')
-    X = vectorizer.fit_transform(corpus)
-    y = data['Category'].values
+    df = pd.read_csv(csv_path).dropna()
 
-    model = LogisticRegression(max_iter=1000)
-    model.fit(X, y)
+    df = df.sample(min(15000, len(df)))
 
-    return model, vectorizer
+    df.columns = [c.lower() for c in df.columns]
 
-st.set_page_config(page_title="Spam Detector", page_icon="📧")
+    if df['label'].dtype == 'object':
+        df['label'] = df['label'].map({'ham': 0, 'spam': 1, 'phishing': 1, 'phish': 1})
 
-st.title("📧 Spam Email & SMS Detector")
-st.write("Check whether a message is **Spam or Not Spam** using Machine Learning.")
+    max_words, max_len = 5000, 150
+    tokenizer = Tokenizer(num_words=max_words, lower=True)
+    tokenizer.fit_on_texts(df['text'].astype(str).values)
 
-with st.spinner("Training model..."):
-    model, vectorizer = load_model()
+    X = pad_sequences(tokenizer.texts_to_sequences(df['text'].astype(str).values), maxlen=max_len)
+    Y = df['label'].values
 
-user_input = st.text_area("Enter your message here:", height=200)
+    model = Sequential([
+        Embedding(max_words, 128, input_length=max_len),
+        SpatialDropout1D(0.3),
+        LSTM(64, dropout=0.2, recurrent_dropout=0.2),
+        Dense(1, activation='sigmoid')
+    ])
 
-if st.button("Check Message"):
-    if user_input.strip():
+    model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy'])
+    model.fit(X, Y, epochs=2, batch_size=64, verbose=0)
 
-        msg = re.sub('[^a-zA-Z]', ' ', user_input)
-        msg = msg.lower()
+    return model, tokenizer, max_len
 
-        vector = vectorizer.transform([msg])
+# --- UI ---
+st.set_page_config(page_title="Email Shield", page_icon="🛡️")
+st.title("🛡️ LSTM Spam & Phish Detector")
 
-        prediction = model.predict(vector)[0]
-        prob = model.predict_proba(vector)[0][1]
+with st.spinner("Loading dataset and training LSTM... this may take a minute."):
+    model, tokenizer, max_len = load_and_train()
 
-        st.divider()
+if model:
+    user_input = st.text_area("Paste email text below:", height=200)
+    if st.button("Run Security Check"):
+        if user_input.strip():
+            seq = tokenizer.texts_to_sequences([user_input])
+            padded = pad_sequences(seq, maxlen=max_len)
+            prob = model.predict(padded)[0][0]
 
-        if prediction == 1:
-            st.error(f"🚨 Spam Detected (Confidence: {prob:.2%})")
+            st.divider()
+            if prob > 0.5:
+                st.error(f"🚨 ALERT: Potential Threat Detected (Confidence: {prob:.2%})")
+            else:
+                st.success(f"✅ CLEAN: This email appears safe (Confidence: {1-prob:.2%})")
         else:
-            st.success(f"✅ Not Spam (Confidence: {1-prob:.2%})")
-
-    else:
-        st.warning("Please enter some text.")
+            st.warning("Please enter some text to analyze.")
