@@ -1,3 +1,3 @@
-python
-dataset
 streamlit
+pandas
+scikit-learn
